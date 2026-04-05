@@ -31,7 +31,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ ses
 
     // Build & push Sanity doc
     const doc = buildSanityDocument(filteredData, specs, pricing, imageAssetIds, schemaType, customTags, details, finalMarketing);
-    const result = await sanity.create(doc);
+    const result = await sanity.create(doc as { _type: string } & Record<string, unknown>);
 
     // Meta Catalog (best-effort, don't fail the push if it errors)
     let metaSuccess = false;
