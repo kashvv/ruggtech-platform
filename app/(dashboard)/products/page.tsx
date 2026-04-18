@@ -186,6 +186,7 @@ export default function ProductsPage() {
   const [rescrapeFetching, setRescrapeFetching] = useState(false);
   const [changingType, setChangingType] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [aiFilling, setAiFilling] = useState(false);
 
   // Catalog state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -404,6 +405,48 @@ export default function ProductsPage() {
       toast((err as Error).message, 'error');
     } finally {
       setChangingType(false);
+    }
+  }
+
+  async function handleAIFill() {
+    if (!selected) return;
+    // Collect all fields across all tabs that are currently empty
+    const allFields = Object.values(FIELD_GROUPS).flatMap(g => g.fields);
+    const emptyFieldKeys = allFields
+      .filter(({ key }) => {
+        const val = getField(key);
+        if (val === undefined || val === null || val === '') return true;
+        if (Array.isArray(val) && val.length === 0) return true;
+        return false;
+      })
+      .map(({ key }) => key);
+
+    if (emptyFieldKeys.length === 0) {
+      toast('No empty fields to fill', 'info');
+      return;
+    }
+
+    setAiFilling(true);
+    try {
+      const res = await fetch(`/api/products/${selected._id}/ai-fill`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emptyFieldKeys }),
+      });
+      const data = await res.json();
+      if (!res.ok) { toast(data.error || 'AI fill failed', 'error'); return; }
+      const filled = data.filled || {};
+      const filledKeys = Object.keys(filled);
+      if (filledKeys.length === 0) {
+        toast('AI could not confidently fill any fields', 'warning');
+        return;
+      }
+      setEdits(prev => ({ ...prev, ...filled }));
+      toast(`AI filled ${filledKeys.length} field${filledKeys.length > 1 ? 's' : ''} — review and save`, 'success');
+    } catch (err: unknown) {
+      toast((err as Error).message, 'error');
+    } finally {
+      setAiFilling(false);
     }
   }
 
@@ -841,6 +884,15 @@ export default function ProductsPage() {
                 </div>
               </div>
               <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <button onClick={handleAIFill} disabled={aiFilling} style={{
+                  padding: '8px 16px', background: aiFilling ? '#4c1d95' : '#7c3aed',
+                  border: '1px solid #a78bfa', borderRadius: '8px', color: '#fff',
+                  fontSize: '12px', fontWeight: 700, cursor: aiFilling ? 'not-allowed' : 'pointer',
+                  opacity: aiFilling ? 0.7 : 1,
+                  minHeight: '44px',
+                }}>
+                  {aiFilling ? 'AI Filling…' : '✨ AI Fill Missing'}
+                </button>
                 {hasEdits && (
                   <button onClick={saveChanges} disabled={saving} style={{
                     padding: '8px 18px', background: 'var(--brand)',

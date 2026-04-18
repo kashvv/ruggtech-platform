@@ -64,6 +64,58 @@ ${specLines}`,
   return currentDetails;
 }
 
+export async function fillMissingFields(
+  product: Record<string, unknown>,
+  emptyFieldKeys: string[],
+): Promise<Record<string, string>> {
+  const contextLines = Object.entries(product)
+    .filter(([k, v]) => v && typeof v === 'string' && !emptyFieldKeys.includes(k) && !k.startsWith('_') && !k.startsWith('image'))
+    .map(([k, v]) => `${k}: ${v}`)
+    .join('\n');
+
+  const fieldList = emptyFieldKeys.join(', ');
+
+  const message = await client.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 2000,
+    messages: [{
+      role: 'user',
+      content: `You are a product data specialist for RUGGTECH, a wholesale tech and equipment supplier in Trinidad & Tobago.
+
+Based on the existing product information below, generate plausible values for the MISSING fields. Only use factual information that can be reasonably inferred from the existing data. If you genuinely cannot determine a value with confidence, leave it out.
+
+MISSING FIELDS TO FILL: ${fieldList}
+
+EXISTING PRODUCT DATA:
+${contextLines}
+
+RULES:
+- Only infer facts from the existing data — do not fabricate specs that aren't supported
+- For descriptions/details, write professional B2B wholesale copy
+- For SEO titles: under 60 chars, include brand + product type
+- For SEO descriptions: under 160 chars, focus on key benefits
+- For keywords/tags: relevant search terms as array
+- For prices: leave empty if not clearly derivable
+
+Output a JSON object with only the fields you can confidently fill. Format:
+{"fieldKey": "value", ...}
+
+Output ONLY the JSON object, no commentary, no markdown code fences.`,
+    }],
+  });
+
+  const block = message.content[0];
+  if (block.type !== 'text') return {};
+  try {
+    const text = block.text.trim().replace(/^```json\s*|\s*```$/g, '');
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') return parsed as Record<string, string>;
+  } catch {
+    // Invalid JSON response — return empty
+  }
+  return {};
+}
+
 export async function rewriteMarketing(
   currentCaption: string,
   productName: string,

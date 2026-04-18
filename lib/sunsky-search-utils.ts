@@ -1,4 +1,5 @@
 import * as cheerio from 'cheerio';
+import type { AnyNode } from 'domhandler';
 import { sanity } from '@/lib/sanity';
 
 export const RUGGED_BRANDS = new Set([
@@ -49,7 +50,7 @@ export function isAlreadyInSanity(productName: string, existingNames: Set<string
   return false;
 }
 
-export function extractPrice($el: cheerio.Cheerio<cheerio.Element>, $: cheerio.CheerioAPI): number | null {
+export function extractPrice($el: cheerio.Cheerio<AnyNode>, _$: cheerio.CheerioAPI): number | null {
   let card = $el.parent();
   let priceStr = '';
   for (let i = 0; i < 6 && !priceStr; i++) {

@@ -157,6 +157,17 @@ export default function ImportPage() {
   const [psSearching, setPsSearching] = useState(false);
   const [psError, setPsError] = useState('');
 
+  // Sunsky Accessories browse state
+  const [showAccessories, setShowAccessories] = useState(false);
+  const [accResults, setAccResults] = useState<(SearchProduct & { category: string })[]>([]);
+  const [accCategories, setAccCategories] = useState<Record<string, number>>({});
+  const [accBrands, setAccBrands] = useState<Record<string, number>>({});
+  const [accCategory, setAccCategory] = useState('');
+  const [accBrand, setAccBrand] = useState('');
+  const [accModelFilter, setAccModelFilter] = useState('');
+  const [accBrowsing, setAccBrowsing] = useState(false);
+  const [accSelected, setAccSelected] = useState<Set<string>>(new Set());
+
   // GreenAge browse state
   const [showGreenAge, setShowGreenAge] = useState(false);
   const [greenAgeResults, setGreenAgeResults] = useState<(SearchProduct & { category: string })[]>([]);
@@ -271,6 +282,48 @@ export default function ImportPage() {
     setGreenAgeSelected(new Set());
     setShowGreenAge(false);
     toast(`${greenAgeSelected.size} URL${greenAgeSelected.size > 1 ? 's' : ''} added to import`, 'success');
+  }
+
+  async function handleAccessoryBrowse() {
+    setAccBrowsing(true);
+    try {
+      const params = new URLSearchParams();
+      if (accBrand) params.set('brand', accBrand);
+      if (accCategory) params.set('category', accCategory);
+      const res = await fetch(`/api/search/accessories?${params}`);
+      const data = await res.json();
+      if (!res.ok) { toast(data.error || 'Browse failed', 'error'); return; }
+      setAccResults(data.products);
+      setAccCategories(data.categories || {});
+      setAccBrands(data.brands || {});
+    } catch (err: unknown) {
+      toast((err as Error).message, 'error');
+    } finally {
+      setAccBrowsing(false);
+    }
+  }
+
+  function toggleAccUrl(productUrl: string, product?: { price: number | null; name: string }) {
+    setAccSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(productUrl)) {
+        next.delete(productUrl);
+        browsePriceMap.current.delete(productUrl);
+      } else {
+        next.add(productUrl);
+        if (product) browsePriceMap.current.set(productUrl, product);
+      }
+      return next;
+    });
+  }
+
+  function importAccSelected() {
+    if (!accSelected.size) { toast('Select accessories first', 'warning'); return; }
+    const urls = [...accSelected].join('\n');
+    setUrl(prev => prev ? prev + '\n' + urls : urls);
+    setAccSelected(new Set());
+    setShowAccessories(false);
+    toast(`${accSelected.size} URL${accSelected.size > 1 ? 's' : ''} added to import`, 'success');
   }
 
   function updateQueueByIndex(index: number, updater: (item: QueueItem) => QueueItem) {
@@ -828,6 +881,98 @@ export default function ImportPage() {
             )}
           </div>
 
+          {/* Browse Sunsky Accessories & Parts */}
+          <div style={{ marginBottom: '20px' }}>
+            <button onClick={() => { setShowAccessories(!showAccessories); if (!showAccessories && !accResults.length) handleAccessoryBrowse(); }} style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', padding: '8px 16px', color: 'var(--text-muted)', fontSize: '13px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', width: '100%', justifyContent: 'center' }}>
+              {showAccessories ? 'Hide' : 'Browse'} Sunsky Accessories & Parts
+              <span style={{ fontSize: '10px', color: '#fbbf24' }}>[Cases, Chargers, Parts & More]</span>
+              <span style={{ fontSize: '10px', color: 'var(--text-dim)' }}>{showAccessories ? '[-]' : '[+]'}</span>
+            </button>
+
+            {showAccessories && (
+              <div style={{ marginTop: '12px', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: '10px', padding: '16px' }}>
+                {/* Brand filter pills */}
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                  <button onClick={() => setAccBrand('')} style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, border: `1px solid ${!accBrand ? '#f59e0b' : 'var(--border)'}`, background: !accBrand ? 'rgba(245,158,11,0.15)' : 'transparent', color: !accBrand ? '#fbbf24' : 'var(--text-muted)', cursor: 'pointer' }}>All Brands</button>
+                  {['BLACKVIEW', 'ULEFONE', 'OUKITEL', 'UMIDIGI', 'DOOGEE', 'HOTWAV', 'UNIHERTZ', 'UNIWA', 'CUBOT', 'AGM'].map(b => (
+                    <button key={b} onClick={() => setAccBrand(b)} style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, border: `1px solid ${accBrand === b ? '#f59e0b' : 'var(--border)'}`, background: accBrand === b ? 'rgba(245,158,11,0.15)' : 'transparent', color: accBrand === b ? '#fbbf24' : 'var(--text-muted)', cursor: 'pointer' }}>
+                      {b} {accBrands[b] ? `(${accBrands[b]})` : ''}
+                    </button>
+                  ))}
+                  <button onClick={handleAccessoryBrowse} disabled={accBrowsing} style={{ marginLeft: 'auto', padding: '4px 14px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                    {accBrowsing ? 'Loading...' : 'Refresh'}
+                  </button>
+                </div>
+
+                {/* Category filter pills */}
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                  <button onClick={() => setAccCategory('')} style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, border: `1px solid ${!accCategory ? '#f59e0b' : 'var(--border)'}`, background: !accCategory ? 'rgba(245,158,11,0.15)' : 'transparent', color: !accCategory ? '#fbbf24' : 'var(--text-muted)', cursor: 'pointer' }}>All Categories</button>
+                  {[
+                    { key: 'cases', label: 'Cases & Covers' },
+                    { key: 'screen-protection', label: 'Screen Protectors' },
+                    { key: 'charging', label: 'Cables & Chargers' },
+                    { key: 'replacement-parts', label: 'Replacement Parts' },
+                    { key: 'mounts-holders', label: 'Mounts & Holders' },
+                    { key: 'other', label: 'Other' },
+                  ].map(cat => (
+                    <button key={cat.key} onClick={() => setAccCategory(cat.key)} style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '11px', fontWeight: 600, border: `1px solid ${accCategory === cat.key ? '#f59e0b' : 'var(--border)'}`, background: accCategory === cat.key ? 'rgba(245,158,11,0.15)' : 'transparent', color: accCategory === cat.key ? '#fbbf24' : 'var(--text-muted)', cursor: 'pointer' }}>
+                      {cat.label} {accCategories[cat.key] ? `(${accCategories[cat.key]})` : ''}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Model filter input */}
+                <input type="text" value={accModelFilter} onChange={e => setAccModelFilter(e.target.value)} placeholder="Filter by model name (e.g. WP33)" style={{ ...inp(), marginBottom: '12px', fontSize: '12px' }} />
+
+                {accBrowsing && <div style={{ textAlign: 'center', padding: '30px', color: 'var(--text-dim)', fontSize: '13px' }}><Spin /> Searching accessories...</div>}
+
+                {!accBrowsing && accResults.length > 0 && (() => {
+                  const visible = accResults.filter(p =>
+                    (!accBrand || p.brand === accBrand) &&
+                    (!accCategory || p.category === accCategory) &&
+                    (!accModelFilter || p.name.toLowerCase().includes(accModelFilter.toLowerCase()))
+                  );
+                  return (
+                    <>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                        <span style={{ fontSize: '12px', color: 'var(--text-dim)' }}>{visible.length} accessories{accBrand ? ` for ${accBrand}` : ''}{accCategory ? ` in ${accCategory.replace(/-/g, ' ')}` : ''} &middot; {accSelected.size} selected</span>
+                        {accSelected.size > 0 && (
+                          <button onClick={importAccSelected} style={{ padding: '6px 16px', background: '#92400e', border: '1px solid #f59e0b', borderRadius: '8px', color: '#fbbf24', fontSize: '12px', fontWeight: 700, cursor: 'pointer' }}>
+                            Import {accSelected.size} to Scraper
+                          </button>
+                        )}
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: '8px', maxHeight: '400px', overflowY: 'auto' }}>
+                        {visible.map(p => {
+                          const sel = accSelected.has(p.url);
+                          return (
+                            <button key={p.id} onClick={() => toggleAccUrl(p.url, { price: p.price, name: p.name })} style={{ textAlign: 'left', padding: '10px', borderRadius: '8px', border: `1px solid ${sel ? '#f59e0b' : 'var(--border)'}`, background: sel ? 'rgba(245,158,11,0.1)' : 'var(--bg-hover)', cursor: 'pointer', display: 'flex', gap: '10px', alignItems: 'center' }}>
+                              {p.image && <div style={{ width: '44px', height: '44px', borderRadius: '6px', overflow: 'hidden', background: 'var(--bg-surface)', flexShrink: 0 }}><img src={`/api/imgproxy?url=${encodeURIComponent(p.image)}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} /></div>}
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-base)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+                                <div style={{ fontSize: '11px', color: p.price ? '#4ade80' : 'var(--text-dim)', marginTop: '3px' }}>
+                                  {p.price ? `$${p.price.toFixed(2)} USD` : 'Price on page'}
+                                  <span style={{ marginLeft: '8px', color: '#fbbf24', fontSize: '10px' }}>{p.category.replace(/-/g, ' ')}</span>
+                                </div>
+                              </div>
+                              <div style={{ width: '18px', height: '18px', borderRadius: '4px', border: `2px solid ${sel ? '#f59e0b' : 'var(--border)'}`, background: sel ? '#f59e0b' : 'transparent', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', color: '#fff' }}>
+                                {sel && '\u2713'}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  );
+                })()}
+
+                {!accBrowsing && accResults.length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-dim)', fontSize: '13px' }}>No accessories found. Click Refresh to browse.</div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Browse GreenAge Farms */}
           <div style={{ marginBottom: '20px' }}>
             <button onClick={() => { setShowGreenAge(!showGreenAge); if (!showGreenAge && !greenAgeResults.length) handleGreenAgeBrowse(); }} style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: '8px', padding: '8px 16px', color: 'var(--text-muted)', fontSize: '13px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px', width: '100%', justifyContent: 'center' }}>
@@ -982,7 +1127,7 @@ export default function ImportPage() {
             )}
           </div>
 
-          {!preview && !scraping && !showSearch && !showGreenAge && !showPartsouq && (
+          {!preview && !scraping && !showSearch && !showGreenAge && !showPartsouq && !showAccessories && (
             <div style={{ textAlign: 'center', padding: '80px 20px', color: 'var(--text-dim)' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px', opacity: 0.3 }}>?</div>
               <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px' }}>Paste one or more product URLs above</div>
