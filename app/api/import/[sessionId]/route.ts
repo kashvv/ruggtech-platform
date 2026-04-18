@@ -83,6 +83,42 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
       s.specs = { ...s.specs, [key]: val };
       break;
     }
+    case 'ai_rewrite_details': {
+      const { rewriteDescription } = await import('@/lib/ai-rewrite');
+      const rewritten = await rewriteDescription(
+        s.details || '',
+        s.scrapedData?.name || '',
+        s.scrapedData?.brand || '',
+        s.schemaType || 'product',
+        s.specs || {},
+      );
+      s.details = rewritten;
+      break;
+    }
+    case 'ai_rewrite_marketing': {
+      const { rewriteMarketing } = await import('@/lib/ai-rewrite');
+      const currentCaption = value || s.details || '';
+      const rewritten = await rewriteMarketing(
+        currentCaption,
+        s.scrapedData?.name || '',
+        s.scrapedData?.brand || '',
+      );
+      // Return the rewritten marketing text in the response — don't store it on session
+      updateSession(sessionId, s);
+      return NextResponse.json({
+        sessionId: s.sessionId,
+        name: s.scrapedData.name,
+        brand: s.scrapedData.brand,
+        schemaType: s.schemaType,
+        slug: s.slug,
+        pricing: s.pricing,
+        removedImages: s.removedImages,
+        customTags: s.customTags,
+        specs: s.specs,
+        details: s.details,
+        rewrittenMarketing: rewritten,
+      });
+    }
     default:
       return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
   }

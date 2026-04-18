@@ -25,9 +25,8 @@ export async function POST(req: NextRequest) {
     const markupPct   = parseFloat(markup) || parseFloat(process.env.DEFAULT_MARKUP_PERCENT || '35');
     const usdToTtd    = parseFloat(process.env.USD_TO_TTD_RATE || '6.80');
 
-    // Use USD price only. If site showed TTD (e.g. Sunsky), price is null — user sets manually.
-    const usdPrice = scrapedData.price && scrapedData.currency !== 'TTD' ? scrapedData.price : 0;
-    const pricing     = calculatePricing(usdPrice, markupPct, usdToTtd);
+    // Pricing is null until user manually sets their selling price
+    const pricing = calculatePricing(scrapedData.price && scrapedData.currency !== 'TTD' ? scrapedData.price : 0, markupPct, usdToTtd);
     const keywords    = generateKeywords(scrapedData, specs);
     const slug        = generateSlug(scrapedData.name);
     const seoTitle    = generateSeoTitle(scrapedData);
@@ -77,8 +76,8 @@ export async function POST(req: NextRequest) {
       imageCount: scrapedData.images.length,
       downloadedCount: downloadedFiles.length,
       marketing,
-      scrapedPriceTTD: scrapedData.priceTTD || null,
-      scrapedPriceUSD: scrapedData.price || null,
+      scrapedPriceTTD: scrapedData.currency === 'TTD' ? (scrapedData.price || null) : null,
+      scrapedPriceUSD: scrapedData.currency !== 'TTD' ? (scrapedData.price || null) : null,
     });
   } catch (err: unknown) {
     console.error('Scrape error:', err);

@@ -11,7 +11,7 @@ const nextConfig: NextConfig = {
       { protocol: "https", hostname: "cdn.shopify.com" },
     ],
   },
-  serverExternalPackages: ["sharp", "cheerio"],
+  serverExternalPackages: ["sharp", "cheerio", "pdfkit"],
 };
 
 export default nextConfig;

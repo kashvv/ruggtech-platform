@@ -53,7 +53,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ ses
       metaSuccess = !!metaResult;
     } catch {}
 
-    cleanupTemp();
+    // Only delete this product's temp files, not all temp images
+    for (const f of activeFiles) {
+      try {
+        const fs = require('fs');
+        if (fs.existsSync(f.filepath)) fs.unlinkSync(f.filepath);
+        // Also clean up processed variants (-nobg.png, -wm.jpg, etc.)
+        const dir = require('path').dirname(f.filepath);
+        const base = require('path').basename(f.filepath).replace(/\.[^.]+$/, '');
+        const dirFiles = fs.readdirSync(dir) as string[];
+        for (const df of dirFiles) {
+          if (df.startsWith(base) && df !== require('path').basename(f.filepath)) {
+            try { fs.unlinkSync(require('path').join(dir, df)); } catch {}
+          }
+        }
+      } catch {}
+    }
     deleteSession(sessionId);
 
     return NextResponse.json({

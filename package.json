@@ -9,7 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "@sanity/client": "^7.20.0",
+    "@types/pdfkit": "^0.17.6",
     "axios": "^1.14.0",
     "bcryptjs": "^3.0.3",
     "cheerio": "^1.2.0",
@@ -17,6 +19,11 @@
     "jose": "^6.2.2",
     "next": "16.2.2",
     "next-auth": "^5.0.0-beta.30",
+    "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.18.0",
+    "playwright": "^1.59.1",
+    "playwright-extra": "^4.3.6",
+    "playwright-extra-plugin-stealth": "^0.0.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "sharp": "^0.34.5",

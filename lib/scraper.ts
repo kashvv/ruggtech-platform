@@ -1,7 +1,12 @@
 import * as cheerio from 'cheerio';
-import type { ScrapedData } from './product-processor';
+import type { ScrapedData, ColorVariant } from './product-processor';
 
 async function fetchPage(url: string): Promise<string> {
+  // PartSouq is behind Cloudflare — use Playwright to render it in a real browser
+  if (url.includes('partsouq.com')) {
+    return fetchWithPlaywright(url);
+  }
+
   const res = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -13,6 +18,41 @@ async function fetchPage(url: string): Promise<string> {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
   return res.text();
+}
+
+async function fetchWithPlaywright(url: string): Promise<string> {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+    ],
+  });
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      locale: 'en-US',
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      // @ts-expect-error patching chrome runtime for fingerprint evasion
+      window.chrome = { runtime: {} };
+    });
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // Wait for Cloudflare to resolve
+    await page.waitForFunction(
+      () => !document.title.includes('Just a moment'),
+      { timeout: 20000 }
+    ).catch(() => {});
+    await page.waitForTimeout(3000);
+    return await page.content();
+  } finally {
+    await browser.close();
+  }
 }
 
 function clean(t: string, maxLen = 4000): string {
@@ -348,6 +388,25 @@ function parseSunskyDescription(raw: string, data: ScrapedData): void {
   if (boxContents.length) data.boxContents = boxContents;
 }
 
+// ── Color name → hex map ───────────────────────────────────────────────────
+
+const COLOR_HEX: Record<string, string> = {
+  black: '#1a1a1a', white: '#f5f5f5', silver: '#c0c0c0', gray: '#808080', grey: '#808080',
+  red: '#e53935', blue: '#1565c0', green: '#2e7d32', yellow: '#f9a825', orange: '#e65100',
+  purple: '#6a1b9a', pink: '#e91e63', brown: '#4e342e', gold: '#ffc107',
+  'night vision': '#1b5e20', 'dark green': '#1b5e20', 'army green': '#4a5240',
+  'sky blue': '#0288d1', 'navy blue': '#0d47a1', 'rose gold': '#c47f6e',
+  'space gray': '#4a4a4a', titanium: '#878681',
+};
+
+function colorToHex(name: string): string {
+  const lower = name.toLowerCase();
+  for (const [key, hex] of Object.entries(COLOR_HEX)) {
+    if (lower.includes(key)) return hex;
+  }
+  return '#888888';
+}
+
 // ── Site extractors ────────────────────────────────────────────────────────
 
 async function extractSunsky($: cheerio.CheerioAPI, data: ScrapedData): Promise<void> {
@@ -366,10 +425,12 @@ async function extractSunsky($: cheerio.CheerioAPI, data: ScrapedData): Promise<
     } catch {}
   });
 
-  // Store display price separately as TTD reference — not used in USD pricing calc
-  const priceEl = $('.current-price,.product-price,.price-box,.price').first().text().match(/[\d,]+\.?\d*/);
-  if (priceEl) data.priceTTD = parseFloat(priceEl[0].replace(/,/g, ''));
-  // data.price (USD) intentionally left null for Sunsky — user sets markup manually
+  // Extract USD wholesale price from #main-price or span.bold.red
+  const mainPrice = $('#main-price').text().match(/\$\s*([\d,]+\.?\d*)/) || $('span.bold.red').first().text().match(/\$\s*([\d,]+\.?\d*)/);
+  if (mainPrice) {
+    data.price = parseFloat(mainPrice[1].replace(/,/g, ''));
+    data.currency = 'USD';
+  }
 
   const html = $.html();
 
@@ -434,6 +495,98 @@ async function extractSunsky($: cheerio.CheerioAPI, data: ScrapedData): Promise<
 
   const stockMatch = html.match(/stock_quantity['":\s]+(\d+)/i) || html.match(/qty_in_stock['":\s]+(\d+)/i);
   if (stockMatch) data.stockQuantity = parseInt(stockMatch[1]);
+
+  // ── Detect color variant links ─────────────────────────────────────────
+  // Sunsky color variants share the same item code prefix but differ in the last letter(s)
+  // e.g. MPH3087Y (Yellow), MPH3087B (Black/Blue), MPH3087S (Silver)
+  // They appear as sibling product links on the page
+  const variantUrls = new Set<string>();
+  variantUrls.add(data.sourceUrl);
+
+  // Look for links to sibling SKUs (same prefix, different color suffix)
+  const currentItemNo = data.itemNo || '';
+  const itemPrefix = currentItemNo.replace(/[A-Z]{1,2}$/, '');
+
+  $('a[href*="/p/"]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    const m = href.match(/\/p\/([A-Z0-9]+)(?:\.htm)?/i);
+    if (!m) return;
+    const candidateNo = m[1].toUpperCase();
+    // Must share the same prefix and be a different color code
+    if (itemPrefix && candidateNo.startsWith(itemPrefix) && candidateNo !== currentItemNo.toUpperCase()) {
+      const full = href.startsWith('http') ? href : `https://www.sunsky-online.com${href.startsWith('/') ? '' : '/'}${href}`;
+      variantUrls.add(full);
+    }
+  });
+
+  if (variantUrls.size > 1) {
+    // Current URL's color from og:description or specs
+    const currentColorName = data.specifications.color || currentItemNo.slice(-1) || 'Default';
+    const variants: ColorVariant[] = [];
+
+    for (const vUrl of variantUrls) {
+      try {
+        if (variants.length >= 9) break;
+        let vImages = data.images;
+        let vColorName = currentColorName;
+
+        if (vUrl !== data.sourceUrl) {
+          const vHtml = await fetchPage(vUrl);
+          const v$ = cheerio.load(vHtml);
+          // Extract item no for this variant
+          const vItemMatch = vHtml.match(/ITEM_NO\s*=\s*['"]([^'"]+)['"]/);
+          const vUploadMatch = vHtml.match(/UPLOAD_URL\s*=\s*['"]([^'"]+)['"]/);
+          const vItemNo = vItemMatch?.[1] || '';
+          const vBase = (vUploadMatch?.[1] || 'https://img.diylooks.com/upload/store').replace(/\/$/, '');
+
+          // Color name from og:description color line
+          const vOgDesc = v$('meta[property="og:description"]').attr('content') || '';
+          const vColorMatch = vOgDesc.match(/Colour?[:\s]+([^\n<,;.]{2,30})/i)
+            || v$('title').text().match(/\b(Black|Blue|Silver|Yellow|Green|Red|Orange|Purple|Pink|White|Gray|Grey|Gold|Brown)\b/i);
+          if (vColorMatch) vColorName = vColorMatch[1].trim();
+          else {
+            // Derive from last 1-2 chars of item no
+            const suffix = vItemNo.slice(-2).toUpperCase();
+            const suffixMap: Record<string, string> = { Y: 'Yellow', B: 'Black', S: 'Silver', G: 'Green', R: 'Red', W: 'White', O: 'Orange', P: 'Purple' };
+            vColorName = suffixMap[suffix.slice(-1)] || suffix;
+          }
+
+          // Gallery images for this variant
+          const vGalleryImgs: string[] = [];
+          v$('img[zoom], img.zoom, .product-gallery img, #imglist img, li img[src*="detail"]').each((_, el) => {
+            const src = v$(el).attr('zoom') || v$(el).attr('src') || '';
+            const full = src.startsWith('//') ? 'https:' + src : src;
+            if (full.includes('detail') && full.startsWith('http') && !vGalleryImgs.includes(full)) {
+              vGalleryImgs.push(full);
+            }
+          });
+
+          if (vItemNo) {
+            const vMain = `${vBase}/product_l/${vItemNo}.jpg`;
+            vImages = vGalleryImgs.length > 0
+              ? [vMain, ...vGalleryImgs].filter((u, i, arr) => arr.indexOf(u) === i).slice(0, 8)
+              : [vMain];
+          }
+        } else {
+          // Current URL — use already-scraped images and color
+          vImages = data.images;
+        }
+
+        variants.push({
+          name: vColorName,
+          hex: colorToHex(vColorName),
+          sourceUrl: vUrl,
+          images: vImages,
+        });
+      } catch {
+        // skip failed variant
+      }
+    }
+
+    if (variants.length > 1) {
+      data.colorVariants = variants;
+    }
+  }
 }
 
 function extractHotwav($: cheerio.CheerioAPI, data: ScrapedData): void {
@@ -638,6 +791,228 @@ function extractGeneric($: cheerio.CheerioAPI, data: ScrapedData): void {
   data.keyFeatures = extractKeyFeatures(pageText);
 }
 
+// ── PartSouq extractor ─────────────────────────────────────────────────────
+// PartSouq blocks server fetch with Cloudflare. This extractor handles cases
+// where the fetch does succeed (e.g., user pastes direct product URL).
+
+function extractPartsouq($: cheerio.CheerioAPI, data: ScrapedData): void {
+  // Product name
+  const h1 = $('h1').first().text().trim();
+  if (h1) data.name = h1;
+
+  // Part number from h2: "Part number: XXXXX"
+  const h2 = $('h2').first().text().trim();
+  const pnMatch = h2.match(/Part\s*(?:number|no\.?)[:\s]+([A-Z0-9\-]+)/i);
+  if (pnMatch) data.specifications.partNumber = pnMatch[1];
+
+  // Brand from img alt (brand logo img)
+  $('img[alt]').each((_, el) => {
+    const alt = $(el).attr('alt') || '';
+    if (alt.length > 1 && alt.length < 25 && /^[A-Za-z]/.test(alt) && !/sensor|speed|abs|front|rear|part|cover/i.test(alt)) {
+      if (!data.brand) data.brand = alt;
+    }
+  });
+
+  // Price: look for patterns like "176.33$" or "$176.33"
+  $('*').each((_, el) => {
+    if (!data.price) {
+      const t = $(el).text().trim();
+      const m = t.match(/^([\d,]+\.?\d*)\$$/) || t.match(/^\$([\d,]+\.?\d*)$/);
+      if (m) data.price = parseFloat(m[1].replace(/,/g, ''));
+    }
+  });
+  data.currency = 'USD';
+
+  // Availability
+  $('p').each((_, el) => {
+    const t = $(el).text().trim();
+    if (/Availability[:\s]+\d+/i.test(t)) {
+      const m = t.match(/Availability[:\s]+(\d+)/i);
+      if (m) data.stockQuantity = parseInt(m[1]);
+    }
+  });
+
+  // Product image: link href pattern /assets/tesseract/assets/partsimages/Brand/PART.jpg
+  $('a[href*="partsimages"], a[href*="PartCover"]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    const full = href.startsWith('/') ? 'https://partsouq.com' + href : href;
+    if (full.startsWith('http') && !data.images.includes(full)) {
+      data.images.push(full);
+    }
+  });
+  $('img[src*="partsimages"], img[src*="PartCover"]').each((_, el) => {
+    const src = $(el).attr('src') || '';
+    const full = src.startsWith('/') ? 'https://partsouq.com' + src : src;
+    if (full.startsWith('http') && !data.images.includes(full)) {
+      data.images.push(full);
+    }
+  });
+
+  data.images = [...new Set(data.images)].slice(0, 8);
+
+  // Substitutions: other compatible part numbers from the "Substitutions" section
+  const subs: string[] = [];
+  $('h3').each((_, el) => {
+    if (/Substitution/i.test($(el).text())) {
+      $(el).nextAll().find('h2').each((_, h) => {
+        const m = $(h).text().match(/Part\s*number[:\s]+([A-Z0-9\-]+)/i);
+        if (m) subs.push(m[1]);
+      });
+    }
+  });
+  if (subs.length) data.specifications.compatibility = subs.join(', ');
+}
+
+// ── GreenAge Farms (WooCommerce) extractor ─────────────────────────────────
+
+function extractGreenAgeFarms($: cheerio.CheerioAPI, data: ScrapedData): void {
+  // JSON-LD is the most reliable source on WooCommerce
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const ld = JSON.parse($(el).html() || '');
+      const items = Array.isArray(ld) ? ld : [ld];
+      for (const item of items) {
+        if (item['@type'] === 'Product') {
+          if (item.name) data.name = item.name;
+          if (item.brand?.name) data.brand = item.brand.name;
+          if (item.description) data.description = clean(item.description, 3000);
+          // Price is already TTD on this site
+          // offers can be a single object OR an array; price may be in offers.price
+          // or nested in offers[n].priceSpecification[n].price
+          const offerList = Array.isArray(item.offers) ? item.offers : (item.offers ? [item.offers] : []);
+          for (const offer of offerList) {
+            const directPrice = offer.price ? parseFloat(offer.price) : 0;
+            const specPrice = offer.priceSpecification
+              ? parseFloat((Array.isArray(offer.priceSpecification)
+                  ? offer.priceSpecification[0]
+                  : offer.priceSpecification)?.price || '0')
+              : 0;
+            const p = directPrice || specPrice;
+            if (p > 0) {
+              data.price = p;
+              data.currency = offer.priceCurrency === 'TTD' || !offer.priceCurrency ? 'TTD' : offer.priceCurrency;
+              break;
+            }
+          }
+          if (item.image) {
+            // Strip Jetpack proxy to get original full-res URL
+            const raw = Array.isArray(item.image) ? item.image : [item.image];
+            const imgs = raw.map((u: string) => {
+              const m = u.match(/i\d+\.wp\.com\/(.+?)(?:\?.*)?$/);
+              return m ? `https://${m[1]}` : u;
+            }).filter((u: string) => u.startsWith('http'));
+            if (imgs.length) data.images = imgs.slice(0, 8);
+          }
+          if (item.sku) data.specifications.partNumber = String(item.sku);
+          const avail = item.offers?.availability || '';
+          if (avail.includes('InStock')) data.stockQuantity = 1;
+          else if (avail.includes('OutOfStock')) data.stockQuantity = 0;
+        }
+      }
+    } catch {}
+  });
+
+  // Fallback: WooCommerce gallery images
+  if (!data.images.length) {
+    const imgs: string[] = [];
+    $('.woocommerce-product-gallery img, .product-images img').each((_, el) => {
+      const src = $(el).attr('data-large_image') || $(el).attr('src') || '';
+      const m = src.match(/i\d+\.wp\.com\/(.+?)(?:\?.*)?$/);
+      const url = m ? `https://${m[1]}` : src;
+      if (url.startsWith('http') && !/placeholder|logo|icon/i.test(url)) imgs.push(url);
+    });
+    if (imgs.length) data.images = [...new Set(imgs)].slice(0, 8);
+  }
+
+  // Fallback name/description
+  if (!data.name || data.name === 'Product') {
+    data.name = $('h1.product_title, h1').first().text().trim() || data.name;
+  }
+  if (!data.description) {
+    data.description = clean(
+      $('.woocommerce-product-details__short-description, .product-description, [itemprop="description"]').first().text()
+    );
+  }
+
+  // Fallback price — WooCommerce product page selectors (same source the browse panel uses)
+  if (!data.price) {
+    // Iterate all price elements and take the first non-zero value
+    $('.woocommerce-Price-amount bdi, .price .woocommerce-Price-amount, p.price .amount, .entry-summary .price bdi').each((_, el) => {
+      if (data.price) return false; // already found
+      const raw = $(el).text().replace(/[^\d.]/g, '');
+      const val = raw ? parseFloat(raw) : 0;
+      if (val > 0) {
+        data.price = val;
+        data.currency = 'TTD';
+      }
+    });
+  }
+
+  // Category as brand hint if no brand
+  if (!data.brand) {
+    const cat = $('.posted_in a').first().text().trim();
+    if (cat) data.brand = cat;
+  }
+
+  const pageText = $('body').text();
+  const tableSpecs = parseSpecTable($);
+  Object.assign(data.specifications, tableSpecs);
+  const textSpecs = extractSpecsFromText(pageText);
+  Object.entries(textSpecs).forEach(([k, v]) => { if (!data.specifications[k]) data.specifications[k] = v; });
+
+  data.keyFeatures = extractKeyFeatures(pageText);
+  data.boxContents = extractBoxContents(pageText);
+}
+
+// ── Web description enrichment ─────────────────────────────────────────────
+
+async function enrichDescriptionFromWeb(data: ScrapedData): Promise<void> {
+  // Only enrich when description is short/missing
+  if (data.description && data.description.trim().length > 200) return;
+
+  const name = data.name.trim();
+  if (!name || name === 'Product') return;
+
+  try {
+    // 1. Try Wikipedia summary API (free, no key needed)
+    const wikiQuery = encodeURIComponent(name);
+    const wikiRes = await fetch(
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${wikiQuery}`,
+      { headers: { 'User-Agent': 'RuggtechImporter/1.0' }, signal: AbortSignal.timeout(6000) }
+    );
+    if (wikiRes.ok) {
+      const wikiJson = await wikiRes.json();
+      if (wikiJson.extract && wikiJson.extract.length > 80 && wikiJson.type !== 'disambiguation') {
+        // Only use if it's actually about this product (not a random match)
+        const extract: string = wikiJson.extract;
+        const nameLower = name.toLowerCase();
+        const firstWord = nameLower.split(/\s+/)[0];
+        if (extract.toLowerCase().includes(firstWord)) {
+          data.description = extract.substring(0, 1000);
+          return;
+        }
+      }
+    }
+  } catch { /* wikipedia unavailable */ }
+
+  try {
+    // 2. Fallback: DuckDuckGo instant answer API
+    const ddgQuery = encodeURIComponent(name + ' product description');
+    const ddgRes = await fetch(
+      `https://api.duckduckgo.com/?q=${ddgQuery}&format=json&no_html=1&skip_disambig=1`,
+      { headers: { 'User-Agent': 'RuggtechImporter/1.0' }, signal: AbortSignal.timeout(6000) }
+    );
+    if (ddgRes.ok) {
+      const ddg = await ddgRes.json();
+      const abstract: string = ddg.Abstract || ddg.RelatedTopics?.[0]?.Text || '';
+      if (abstract.length > 80) {
+        data.description = abstract.substring(0, 1000);
+        return;
+      }
+    }
+  } catch { /* ddg unavailable */ }
+}
+
 // ── Main export ────────────────────────────────────────────────────────────
 
 export async function scrapeProduct(url: string): Promise<ScrapedData> {
@@ -663,6 +1038,8 @@ export async function scrapeProduct(url: string): Promise<ScrapedData> {
   else if (u.includes('aliexpress.com'))    extractAliExpress($, data);
   else if (u.includes('ebay.com'))          extractEbay($, data);
   else if (u.includes('amazon.com') || u.includes('amazon.co')) extractAmazon($, data);
+  else if (u.includes('partsouq.com'))       extractPartsouq($, data);
+  else if (u.includes('greenagefarms.com'))  extractGreenAgeFarms($, data);
   else                                      extractGeneric($, data);
 
   data.name = data.name
@@ -684,8 +1061,15 @@ export async function scrapeProduct(url: string): Promise<ScrapedData> {
     .substring(0, 120);
 
   data.images = [...new Set(data.images)].filter(u => u.startsWith('http')).slice(0, 8);
-  data.boxContents = (data.boxContents || []).filter(s => s.length > 2 && s.length < 80);
-  data.keyFeatures = (data.keyFeatures || []).filter(s => s.length > 5 && s.length < 150);
+  data.boxContents = (data.boxContents || [])
+    .filter(s => s.length > 2 && s.length < 80)
+    .filter(s => !s.startsWith('http') && !s.includes('://') && !s.includes('{') && !s.includes('"'));
+  data.keyFeatures = (data.keyFeatures || [])
+    .filter(s => s.length > 5 && s.length < 150)
+    .filter(s => !s.startsWith('http') && !s.includes('://') && !s.includes('{') && !s.includes('"'));
+
+  // Enrich description from web when scraped description is sparse
+  await enrichDescriptionFromWeb(data);
 
   return data;
 }

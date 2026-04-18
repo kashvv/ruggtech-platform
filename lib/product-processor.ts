@@ -1,6 +1,13 @@
 import slugify from 'slugify';
 import type { SchemaType } from './sanity';
 
+export interface ColorVariant {
+  name: string;
+  hex: string;
+  sourceUrl: string;
+  images: string[];
+}
+
 export interface ScrapedData {
   sourceUrl: string;
   name: string;
@@ -18,6 +25,7 @@ export interface ScrapedData {
   stockQuantity?: number;
   boxContents?: string[];
   keyFeatures?: string[];
+  colorVariants?: ColorVariant[];
 }
 
 export interface Pricing {
@@ -176,8 +184,80 @@ export function buildSpecsFromScraped(data: ScrapedData, schema: SchemaType): Sp
 
 // ── Details generator ──────────────────────────────────────────────────────
 
+function generateRuggedDeviceDetails(data: ScrapedData, specs: Specs): string {
+  const stripHtml = (s: string) => s.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+  const cleanDesc = data.description ? stripHtml(data.description) : '';
+  const firstSentence = cleanDesc.match(/^.{20,}?[.!?]/)?.[0] || cleanDesc.slice(0, 100);
+  const headline = firstSentence
+    ? (firstSentence.length > 100 ? firstSentence.slice(0, 97) + '...' : firstSentence)
+    : `Rugged ${data.brand || ''} device built for tough conditions`.trim();
+
+  const specOrder: { key: keyof Specs; label: string }[] = [
+    { key: 'cpu',         label: 'Processor' },
+    { key: 'ramRom',      label: 'Memory' },
+    { key: 'displaySize', label: 'Display' },
+    { key: 'battery',     label: 'Battery' },
+    { key: 'waterproof',  label: 'Protection' },
+    { key: 'os',          label: 'OS' },
+    { key: 'rearCamera',  label: 'Camera' },
+    { key: 'network',     label: 'Network' },
+    { key: 'dimensions',  label: 'Dimensions' },
+    { key: 'weight',      label: 'Weight' },
+  ];
+  const coreSpecs: string[] = [];
+  for (const { key, label } of specOrder) {
+    if (coreSpecs.length >= 6) break;
+    const val = specs[key];
+    if (val && typeof val === 'string') coreSpecs.push(`- ${label}: ${val}`);
+  }
+
+  const rawFeatures = Array.isArray(specs.keyFeatures) ? (specs.keyFeatures as string[]) : [];
+  const features: string[] = [];
+  for (const f of rawFeatures) {
+    if (features.length >= 4) break;
+    const t = f.trim();
+    if (!t) continue;
+    features.push(t.includes(':') ? `- ${t}` : `- ${t}: Purpose-built for demanding real-world use`);
+  }
+  const padding: string[] = [];
+  if (specs.waterproof) padding.push('- Drop and water resistant: survives job-site abuse');
+  if (specs.battery)    padding.push('- Multi-day battery: stays powered through long shifts');
+  if (specs.cpu)        padding.push('- Fast processor: handles apps and multitasking without lag');
+  if (specs.displaySize)padding.push('- Large display: easy to read outdoors and with gloves on');
+  padding.push('- Tough build: engineered to handle harsh environments');
+  for (const p of padding) {
+    if (features.length >= 4) break;
+    if (!features.includes(p)) features.push(p);
+  }
+
+  const bestFor = [
+    '- Field workers - Reliable performance in harsh environments',
+    '- Outdoor enthusiasts - Built to handle drops, dust and water',
+    '- Industrial users - Long battery life for full shift operation',
+  ];
+
+  const boxSource = (data.boxContents && data.boxContents.length > 0)
+    ? data.boxContents
+    : ['Device', 'USB-C cable', 'Power adapter', 'User manual', 'Warranty card'];
+  const box = boxSource.slice(0, 6).map(i => `- ${i}`);
+
+  let out = `${data.name}\n\n`;
+  out += `🎯 ${headline}\n\n`;
+  out += `⚡ Core Specs\n${coreSpecs.join('\n')}\n\n`;
+  out += `✨ Key Features\n${features.join('\n')}\n\n`;
+  out += `🎯 Best For\n${bestFor.join('\n')}\n\n`;
+  out += `📦 In The Box\n${box.join('\n')}\n`;
+  return out;
+}
+
 export function generateDetails(data: ScrapedData, specs: Specs): string {
   const schema = detectSchemaType(data);
+
+  if (schema === 'product') {
+    return generateRuggedDeviceDetails(data, specs);
+  }
+
   let d = `${data.name}\n\n`;
 
   if (specs.keyFeatures && (specs.keyFeatures as string[]).length > 0) {
@@ -186,7 +266,7 @@ export function generateDetails(data: ScrapedData, specs: Specs): string {
     d += '\n';
   }
 
-  if (schema === 'phone' || schema === 'product') {
+  if (schema === 'phone') {
     if (specs.cpu || specs.gpu || specs.ramRom || specs.os) {
       d += `Performance\n`;
       if (specs.cpu)    d += `Processor: ${specs.cpu}\n`;
@@ -290,6 +370,12 @@ export function generateDetails(data: ScrapedData, specs: Specs): string {
     d += '\n';
   }
 
+  // Product overview from scraped/enriched description
+  if (data.description && data.description.trim().length > 20) {
+    const cleanDesc = data.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    d += `Product Overview\n${cleanDesc}\n\n`;
+  }
+
   // What's in the box
   if (data.boxContents && data.boxContents.length > 0) {
     d += `What's in the Box\n`;
@@ -314,6 +400,13 @@ export function generateSeoTitle(data: ScrapedData): string {
 }
 
 export function generateSeoDescription(data: ScrapedData, specs: Specs): string {
+  // If we have a real description, use its first sentence as the SEO desc
+  if (data.description && data.description.trim().length > 40) {
+    const clean = data.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const firstSentence = clean.match(/^.{30,}?[.!?]/)?.[0] || clean.substring(0, 120);
+    const base = `Buy ${data.name} from RUGGTECH. ${firstSentence} `;
+    return (base + 'Ships Caribbean-wide. PayPal & USDT accepted.').substring(0, 160);
+  }
   let d = `Buy ${data.name} from RUGGTECH. `;
   if (specs.battery)     d += `${specs.battery} battery. `;
   if (specs.ramRom)      d += `${specs.ramRom}. `;
@@ -359,7 +452,11 @@ export function generateKeywords(data: ScrapedData, specs: Specs): string[] {
     agritechPage: ['precision farming equipment','agriculture technology','farming equipment Trinidad',
       'hydroponic supplies','irrigation equipment','agritech Caribbean',
       'RUGGTECH farming','greenhouse equipment','drip irrigation','fertigation system',
-      'smart farming','precision agriculture','farming TT','agriculture supplies Trinidad'],
+      'smart farming','precision agriculture','farming TT','agriculture supplies Trinidad',
+      'farm equipment Trinidad','agri supplies TT','Caribbean agriculture','buy farming supplies',
+      'crop management','soil health','plant nutrition','organic farming Trinidad',
+      'greenhouse farming TT','hydroponics Trinidad','vertical farming Caribbean',
+      'farm tools online','agriculture shop TT','RUGGTECH agritech'],
     offgrid: ['off-grid equipment','camping gear Trinidad','survival gear',
       'portable power','solar generator','emergency preparedness',
       'RUGGTECH camping','outdoor equipment Caribbean','solar power Trinidad',
@@ -392,6 +489,22 @@ export function generateKeywords(data: ScrapedData, specs: Specs): string[] {
   if (specs.displaySize) kw.add(`${specs.displaySize} phone`);
   if (specs.network)    kw.add(`${specs.network} phone Trinidad`);
   if (specs.waterproof) kw.add(`${specs.waterproof} rated phone`);
+
+  // Agritech: add product-name-specific terms
+  if (schema === 'agritechPage') {
+    const agriSuffixes = ['Trinidad','Caribbean','TT','price','buy','online','for sale','shop','best'];
+    agriSuffixes.forEach(s => kw.add(`${name} ${s}`));
+    if (brand && brand !== 'RUGGTECH') agriSuffixes.forEach(s => kw.add(`${brand} ${s}`));
+    // Pull meaningful words from description for keyword expansion
+    if (data.description) {
+      const descWords = data.description
+        .replace(/<[^>]+>/g, ' ')
+        .split(/\W+/)
+        .filter(w => w.length > 4 && w.length < 30 && /^[a-zA-Z]/.test(w))
+        .slice(0, 20);
+      descWords.forEach(w => { kw.add(w); kw.add(`${w} Trinidad`); });
+    }
+  }
 
   const result = [...kw].filter(Boolean);
   while (result.length < 200) {
@@ -546,12 +659,33 @@ export function generateMarketingContent(data: ScrapedData, specs: Specs, pricin
   const cta = ctas[schema] || '🛒 Order now — fast delivery across Trinidad & the Caribbean!';
 
   // ── Assemble description ───────────────────────────────────────────────────
-  const bulletBlock = points.length > 0
-    ? '\n\n' + points.map(p => p).join('\n')
+  // Clean points — strip any that contain URLs, JSON fragments, or supplier names
+  const cleanPoints = points.filter(p =>
+    !p.includes('http') &&
+    !p.includes('://') &&
+    !p.includes('{') &&
+    !p.includes('"') &&
+    !/greenage|sunsky|hotwav|aliexpress|amazon|ebay|partsouq/i.test(p)
+  );
+
+  const bulletBlock = cleanPoints.length > 0
+    ? '\n\n' + cleanPoints.join('\n')
+    : '';
+
+  // Use scraped/enriched description as body text when specs are sparse
+  const rawDescClean = data.description
+    ? data.description.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 600)
+    : '';
+  const descPara = rawDescClean.length > 40 &&
+    !rawDescClean.includes('http') &&
+    !rawDescClean.includes('{') &&
+    !rawDescClean.includes('"')
+    ? '\n\n' + rawDescClean
     : '';
 
   const description = [
     headline,
+    descPara,
     bulletBlock,
     boxLine,
     priceLine,
@@ -669,6 +803,19 @@ export function buildSanityDocument(
       asset: { _type: 'reference', _ref: imageAssetIds[i] },
       alt: altTexts[i] || `${data.name} - RUGGTECH`,
     }];
+  }
+
+  // ── Color variants ──────────────────────────────────────────────────────
+  if (data.colorVariants && data.colorVariants.length > 0) {
+    doc.colors = data.colorVariants.map(v => ({ _type: 'object', name: v.name, hex: v.hex }));
+    // imagecolour_urls fields hold the image URL arrays for each variant (uploaded separately)
+    data.colorVariants.forEach((variant, idx) => {
+      if (idx >= 9) return;
+      const field = idx === 0 ? 'imagecolour' : `imagecolour${idx + 1}`;
+      doc[field + '_urls'] = variant.images;
+    });
+  } else if (specs.color) {
+    doc.colors = [{ _type: 'object', name: specs.color as string, hex: '#888888' }];
   }
 
   if (schema === 'phone' || schema === 'product') {

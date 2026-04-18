@@ -176,7 +176,25 @@ export default function ProductsPage() {
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
+  const [rescrapeUrl, setRescrapeUrl] = useState('');
+  const [showRescrape, setShowRescrape] = useState(false);
+  const [rescrapeJobs, setRescrapeJobs] = useState<Record<string, 'running' | 'done' | 'failed'>>({});
+  const [rescrapeImages, setRescrapeImages] = useState<string[]>([]);
+  const [rescrapeBgIdx, setRescrapeBgIdx] = useState<number[]>([]);
+  const [rescrapeWmIdx, setRescrapeWmIdx] = useState<number[]>([]);
+  const [rescrapeRemovedIdx, setRescrapeRemovedIdx] = useState<number[]>([]);
+  const [rescrapeFetching, setRescrapeFetching] = useState(false);
+  const [changingType, setChangingType] = useState(false);
   const [migrating, setMigrating] = useState(false);
+
+  // Catalog state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [showCatalog, setShowCatalog] = useState(false);
+  const [catalogTitle, setCatalogTitle] = useState('RUGGTECH Wholesale Catalog');
+  const [catalogDiscount, setCatalogDiscount] = useState(15);
+  const [catalogLayout, setCatalogLayout] = useState<'grid' | 'list'>('grid');
+  const [catalogPrices, setCatalogPrices] = useState<Record<string, string>>({});
+  const [generatingCatalog, setGeneratingCatalog] = useState(false);
   const [migrateLog, setMigrateLog] = useState<{ name: string; status: 'processing' | 'updated' | 'skipped' | 'error'; fields?: string[]; error?: string }[]>([]);
   const [migrateTotal, setMigrateTotal] = useState(0);
   const [migrateDone, setMigrateDone] = useState<{ updated: number; skipped: number; errors: number } | null>(null);
@@ -266,33 +284,45 @@ export default function ProductsPage() {
 
   useEffect(() => { debouncedFetch(search, typeFilter); }, [search, typeFilter, debouncedFetch]);
 
+  // Clear catalog selection when filter changes
+  useEffect(() => { setSelectedIds(new Set()); }, [typeFilter]);
+
   // fetch detail
   async function selectProduct(id: string) {
     if (isMobile) setMobileView('detail');
-    setLoadingDetail(true);
-    setSelected(null);
     setEdits({});
     setActiveTab('core');
     setConfirmDelete(false);
-    try {
-      const res = await fetch(`/api/products/${id}`);
-      if (!res.ok) { toast('Failed to load product', 'error'); if (isMobile) setMobileView('list'); return; }
-      const data = await res.json();
-      // Build unified image list
-      const allImages: string[] = [];
-      for (const key of ['imageUrl','imageUrl2','imageUrl3','imageUrl4','imageUrl5','imageUrl6']) {
-        const v = data[key];
-        if (!v) continue;
-        if (Array.isArray(v)) allImages.push(...v.filter(Boolean));
-        else if (typeof v === 'string') allImages.push(v);
-      }
-      setSelected({ ...data, imageUrls: allImages });
-    } catch {
-      toast('Error loading product', 'error');
-      if (isMobile) setMobileView('list');
-    } finally {
-      setLoadingDetail(false);
+    setShowRescrape(false);
+    setRescrapeUrl('');
+    setRescrapeImages([]);
+    setRescrapeBgIdx([]);
+    setRescrapeWmIdx([]);
+    setRescrapeRemovedIdx([]);
+
+    // Show product from list immediately so UI isn't blocked
+    const fromList = products.find(p => p._id === id);
+    if (fromList) {
+      setSelected({ ...fromList, imageUrls: fromList.imageUrl ? [fromList.imageUrl] : [] } as ProductDetail);
     }
+
+    // Fetch full detail in background
+    setLoadingDetail(true);
+    fetch(`/api/products/${id}`)
+      .then(async res => {
+        if (!res.ok) { toast('Failed to load product', 'error'); return; }
+        const data = await res.json();
+        const allImages: string[] = [];
+        for (const key of ['imageUrl','imageUrl2','imageUrl3','imageUrl4','imageUrl5','imageUrl6']) {
+          const v = data[key];
+          if (!v) continue;
+          if (Array.isArray(v)) allImages.push(...v.filter(Boolean));
+          else if (typeof v === 'string') allImages.push(v);
+        }
+        setSelected({ ...data, imageUrls: allImages });
+      })
+      .catch(() => {})
+      .finally(() => setLoadingDetail(false));
   }
 
   function getField(key: string): unknown {
@@ -348,6 +378,158 @@ export default function ProductsPage() {
     }
   }
 
+  async function handleChangeType(newType: SchemaType) {
+    if (!selected || newType === selected._type) return;
+    if (hasEdits) {
+      toast('Save or discard changes first', 'warning');
+      return;
+    }
+    if (!confirm(`Move this product from "${TYPE_LABELS[selected._type]}" to "${TYPE_LABELS[newType]}"?\n\nThe old document will be deleted and recreated under the new schema. All fields will be carried over.`)) return;
+    setChangingType(true);
+    try {
+      const res = await fetch(`/api/products/${selected._id}/change-type`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newType }),
+      });
+      const data = await res.json();
+      if (!res.ok) { toast(data.error || 'Change failed', 'error'); return; }
+      toast(`Moved to ${TYPE_LABELS[newType]}`, 'success');
+      setProducts(prev => prev.filter(p => p._id !== selected._id));
+      setSelected(null);
+      setEdits({});
+      fetchProducts(search, typeFilter);
+      if (data.newId) selectProduct(data.newId);
+    } catch (err: unknown) {
+      toast((err as Error).message, 'error');
+    } finally {
+      setChangingType(false);
+    }
+  }
+
+  function toggleSelectProduct(id: string) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    if (selectedIds.size === products.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(products.map(p => p._id)));
+    }
+  }
+
+  function openCatalogModal() {
+    const filterLabel = typeFilter !== 'all' ? TYPE_LABELS[typeFilter] : '';
+    setCatalogTitle(filterLabel ? `RUGGTECH ${filterLabel} — Wholesale Catalog` : 'RUGGTECH Wholesale Catalog');
+    setCatalogPrices({});
+    setShowCatalog(true);
+  }
+
+  async function handleGenerateCatalog() {
+    if (selectedIds.size === 0) return;
+    setGeneratingCatalog(true);
+    try {
+      const overrides: Record<string, number> = {};
+      for (const [id, val] of Object.entries(catalogPrices)) {
+        const n = parseFloat(val);
+        if (!isNaN(n) && n > 0) overrides[id] = n;
+      }
+      const res = await fetch('/api/products/catalog', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          productIds: Array.from(selectedIds),
+          title: catalogTitle,
+          discountPercent: catalogDiscount,
+          layout: catalogLayout,
+          priceOverrides: Object.keys(overrides).length > 0 ? overrides : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+        toast(err.error || 'Catalog generation failed', 'error');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ruggtech-catalog-${new Date().toISOString().split('T')[0]}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setShowCatalog(false);
+      toast(`Catalog generated — ${selectedIds.size} products`, 'success');
+    } catch (err: unknown) {
+      toast((err as Error).message, 'error');
+    } finally {
+      setGeneratingCatalog(false);
+    }
+  }
+
+  async function handleRescrapePreview() {
+    if (!rescrapeUrl.trim()) { toast('Enter a supplier URL', 'warning'); return; }
+    setRescrapeFetching(true);
+    setRescrapeImages([]);
+    setRescrapeBgIdx([]);
+    setRescrapeRemovedIdx([]);
+    try {
+      const res = await fetch('/api/products/rescrape-preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: rescrapeUrl.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { toast(data.error || 'Preview failed', 'error'); return; }
+      setRescrapeImages(data.images);
+      // Default: watermark all
+      setRescrapeWmIdx(data.images.map((_: string, i: number) => i));
+    } catch (err: unknown) {
+      toast((err as Error).message, 'error');
+    } finally {
+      setRescrapeFetching(false);
+    }
+  }
+
+  function handleRescrapeUpload() {
+    if (!selected || !rescrapeUrl.trim()) return;
+    const pid = selected._id;
+    const pname = selected.name || 'Product';
+    const urlToScrape = rescrapeUrl.trim();
+    const bgIdxs = [...rescrapeBgIdx];
+    const wmIdxs = [...rescrapeWmIdx];
+    const removedIdxs = [...rescrapeRemovedIdx];
+
+    setRescrapeJobs(prev => ({ ...prev, [pid]: 'running' }));
+    setShowRescrape(false);
+    setRescrapeUrl('');
+    setRescrapeImages([]);
+    toast(`Uploading images for ${pname}...`, 'success');
+
+    fetch('/api/products/rescrape', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId: pid, url: urlToScrape, bgRemoveIndexes: bgIdxs, watermarkIndexes: wmIdxs, removedIndexes: removedIdxs }),
+    })
+      .then(async res => {
+        const data = await res.json();
+        if (!res.ok) {
+          setRescrapeJobs(prev => ({ ...prev, [pid]: 'failed' }));
+          toast(`${pname}: ${data.error || 'Upload failed'}`, 'error');
+        } else {
+          setRescrapeJobs(prev => ({ ...prev, [pid]: 'done' }));
+          toast(`${pname}: ${data.imagesUploaded} images uploaded!`, 'success');
+          fetchProducts(search, typeFilter);
+        }
+      })
+      .catch(() => {
+        setRescrapeJobs(prev => ({ ...prev, [pid]: 'failed' }));
+        toast(`${pname}: Upload failed`, 'error');
+      });
+  }
+
   const hasEdits = Object.keys(edits).length > 0;
   const showListPanel = !isMobile || mobileView === 'list';
   const showDetailPanel = !isMobile || mobileView === 'detail';
@@ -395,26 +577,52 @@ export default function ProductsPage() {
               <option key={t} value={t}>{TYPE_LABELS[t]}</option>
             ))}
           </select>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
-              {loading ? 'Loading…' : `${total} product${total !== 1 ? 's' : ''}`}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer', fontSize: '11px', color: 'var(--text-dim)' }}>
+                <input
+                  type="checkbox"
+                  checked={products.length > 0 && selectedIds.size === products.length}
+                  onChange={toggleSelectAll}
+                  style={{ accentColor: 'var(--brand)', width: '14px', height: '14px' }}
+                />
+                {selectedIds.size > 0 ? `${selectedIds.size} selected` : (loading ? 'Loading…' : `${total} product${total !== 1 ? 's' : ''}`)}
+              </label>
             </div>
-            <button
-              onClick={handleMigrate}
-              disabled={migrating || loading}
-              title="Backfill all existing products with missing specs, SEO, keywords and marketing data"
-              style={{
-                fontSize: '11px', fontWeight: 600, padding: '4px 10px',
-                background: migrating ? '#1e1b4b' : 'transparent',
-                border: '1px solid var(--border)', borderRadius: '6px',
-                color: migrating ? '#a78bfa' : 'var(--text-dim)',
-                cursor: migrating ? 'not-allowed' : 'pointer',
-                whiteSpace: 'nowrap',
-                minHeight: '44px',
-              }}
-            >
-              {migrating ? 'Migrating…' : 'Backfill All'}
-            </button>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {selectedIds.size > 0 && (
+                <button
+                  onClick={openCatalogModal}
+                  style={{
+                    fontSize: '11px', fontWeight: 600, padding: '4px 10px',
+                    background: 'rgba(34,197,94,0.1)',
+                    border: '1px solid rgba(34,197,94,0.3)', borderRadius: '6px',
+                    color: '#4ade80',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    minHeight: '44px',
+                  }}
+                >
+                  Catalog ({selectedIds.size})
+                </button>
+              )}
+              <button
+                onClick={handleMigrate}
+                disabled={migrating || loading}
+                title="Backfill all existing products with missing specs, SEO, keywords and marketing data"
+                style={{
+                  fontSize: '11px', fontWeight: 600, padding: '4px 10px',
+                  background: migrating ? '#1e1b4b' : 'transparent',
+                  border: '1px solid var(--border)', borderRadius: '6px',
+                  color: migrating ? '#a78bfa' : 'var(--text-dim)',
+                  cursor: migrating ? 'not-allowed' : 'pointer',
+                  whiteSpace: 'nowrap',
+                  minHeight: '44px',
+                }}
+              >
+                {migrating ? 'Migrating…' : 'Backfill All'}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -509,6 +717,16 @@ export default function ProductsPage() {
                     cursor: 'pointer', transition: 'background 0.1s',
                   }}
                 >
+                  {/* Selection checkbox */}
+                  <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                    onClick={e => { e.stopPropagation(); toggleSelectProduct(p._id); }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(p._id)}
+                      readOnly
+                      style={{ accentColor: 'var(--brand)', width: '15px', height: '15px', cursor: 'pointer' }}
+                    />
+                  </div>
                   {/* Thumbnail */}
                   <div style={{
                     width: '44px', height: '44px', flexShrink: 0,
@@ -564,7 +782,7 @@ export default function ProductsPage() {
             <div style={{ fontSize: '40px', opacity: 0.3 }}>⊞</div>
             <div style={{ fontSize: '14px' }}>Select a product to edit</div>
           </div>
-        ) : loadingDetail ? (
+        ) : !selected && loadingDetail ? (
           <div style={{
             flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
             color: 'var(--text-dim)', fontSize: '14px', flexDirection: 'column', gap: '10px',
@@ -687,6 +905,40 @@ export default function ProductsPage() {
 
                 {/* Fields */}
                 <div className="flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-5">
+                  {activeTab === 'core' && (
+                    <div style={{ marginBottom: '18px' }}>
+                      <label style={{
+                        display: 'block', fontSize: '11px', fontWeight: 600,
+                        color: 'var(--text-muted)',
+                        textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px',
+                      }}>
+                        Schema Type {changingType && '• moving…'}
+                      </label>
+                      <select
+                        value={selected._type}
+                        disabled={changingType || hasEdits}
+                        onChange={e => handleChangeType(e.target.value as SchemaType)}
+                        title={hasEdits ? 'Save or discard changes first' : 'Move this product to a different schema'}
+                        style={{
+                          width: '100%', padding: '9px 12px',
+                          background: 'var(--bg-raised)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '8px', color: 'var(--text-base)',
+                          fontSize: isMobile ? '16px' : '13px', outline: 'none', boxSizing: 'border-box',
+                          minHeight: '44px',
+                          cursor: changingType || hasEdits ? 'not-allowed' : 'pointer',
+                          opacity: changingType ? 0.6 : 1,
+                        }}
+                      >
+                        {ALL_TYPES.map(t => (
+                          <option key={t} value={t}>{TYPE_LABELS[t]}</option>
+                        ))}
+                      </select>
+                      <div style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '4px' }}>
+                        Changing this recreates the doc under the new schema and deletes the old one.
+                      </div>
+                    </div>
+                  )}
                   {FIELD_GROUPS[activeTab].fields.map(({ key, label, type }) => {
                     const val = getField(key);
                     const isDirty = key in edits;
@@ -771,7 +1023,7 @@ export default function ProductsPage() {
               </div>
 
               {/* Right: images + quick info */}
-              <div className="flex w-full max-w-full shrink-0 flex-col overflow-hidden border-t border-[var(--border)] md:w-60 md:border-l md:border-t-0">
+              <div className={`flex w-full max-w-full shrink-0 flex-col overflow-hidden border-t border-[var(--border)] md:border-l md:border-t-0 transition-all duration-200 ${showRescrape && rescrapeImages.length > 0 ? 'md:w-96' : 'md:w-60'}`}>
                 {/* Images */}
                 <div style={{ padding: '16px', borderBottom: '1px solid var(--border)' }}>
                   <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '10px' }}>Images</div>
@@ -792,6 +1044,75 @@ export default function ProductsPage() {
                       No images
                     </div>
                   )}
+
+                  {/* Rescrape images */}
+                  {(() => {
+                    const job = selected ? rescrapeJobs[selected._id] : undefined;
+                    const isRunning = job === 'running';
+                    return <>
+                      {isRunning && (
+                        <div style={{ marginTop: '10px', padding: '7px', background: '#1e1b4b', border: '1px solid var(--brand)', borderRadius: '6px', textAlign: 'center', fontSize: '11px', fontWeight: 600, color: '#a78bfa' }}>Uploading images...</div>
+                      )}
+                      {job === 'done' && (
+                        <div style={{ marginTop: '10px', padding: '7px', background: '#071a0e', border: '1px solid #166534', borderRadius: '6px', textAlign: 'center', fontSize: '11px', fontWeight: 600, color: '#4ade80', cursor: 'pointer' }} onClick={() => selected && selectProduct(selected._id)}>Done! Click to refresh</div>
+                      )}
+                      {job === 'failed' && (
+                        <div style={{ marginTop: '10px', padding: '7px', background: '#2d1010', border: '1px solid #991b1b', borderRadius: '6px', textAlign: 'center', fontSize: '11px', fontWeight: 600, color: '#f87171' }}>Upload failed</div>
+                      )}
+                      {!isRunning && (
+                        <button onClick={() => { setShowRescrape(!showRescrape); setRescrapeImages([]); }} style={{ marginTop: '10px', width: '100%', padding: '7px', background: showRescrape ? '#2b1f05' : 'var(--bg-hover)', border: `1px solid ${showRescrape ? '#a16207' : 'var(--border)'}`, borderRadius: '6px', color: showRescrape ? '#fbbf24' : 'var(--text-muted)', fontSize: '11px', fontWeight: 600, cursor: 'pointer' }}>
+                          {showRescrape ? 'Cancel' : 'Rescrape Images'}
+                        </button>
+                      )}
+                      {showRescrape && !isRunning && (
+                        <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          {/* Step 1: URL input + fetch preview */}
+                          {rescrapeImages.length === 0 && (
+                            <>
+                              <input value={rescrapeUrl} onChange={e => setRescrapeUrl(e.target.value)} placeholder="Paste supplier URL..." style={{ width: '100%', padding: '7px 10px', background: 'var(--bg-raised)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text-base)', fontSize: '11px', outline: 'none', boxSizing: 'border-box', minHeight: '36px' }} />
+                              <button onClick={handleRescrapePreview} disabled={rescrapeFetching} style={{ padding: '8px', background: rescrapeFetching ? '#4a2b8a' : 'var(--brand)', border: 'none', borderRadius: '6px', color: '#fff', fontSize: '11px', fontWeight: 700, cursor: rescrapeFetching ? 'not-allowed' : 'pointer' }}>
+                                {rescrapeFetching ? 'Fetching...' : 'Fetch Images'}
+                              </button>
+                            </>
+                          )}
+
+                          {/* Step 2: Image preview with per-image BG/WM toggles */}
+                          {rescrapeImages.length > 0 && (
+                            <>
+                              <div style={{ fontSize: '10px', color: 'var(--text-dim)', marginBottom: '2px' }}>
+                                {rescrapeImages.length - rescrapeRemovedIdx.length} active &middot; {rescrapeBgIdx.length} BG &middot; {rescrapeWmIdx.length} WM
+                              </div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '4px', maxHeight: '300px', overflowY: 'auto' }}>
+                                {rescrapeImages.map((imgUrl, i) => {
+                                  const removed = rescrapeRemovedIdx.includes(i);
+                                  const hasBg = rescrapeBgIdx.includes(i);
+                                  const hasWm = rescrapeWmIdx.includes(i);
+                                  return (
+                                    <div key={i} style={{ borderRadius: '6px', overflow: 'hidden', border: `1px solid ${removed ? 'var(--error)' : 'var(--border)'}`, opacity: removed ? 0.3 : 1, background: 'var(--bg-hover)' }}>
+                                      <div style={{ aspectRatio: '1', position: 'relative' }}>
+                                        <img src={imgUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                                        <div style={{ position: 'absolute', top: '3px', left: '3px', background: 'rgba(0,0,0,0.7)', borderRadius: '3px', padding: '1px 5px', fontSize: '9px', color: '#fff' }}>{i + 1}</div>
+                                      </div>
+                                      <div style={{ padding: '3px', display: 'flex', gap: '2px' }}>
+                                        <button onClick={() => setRescrapeRemovedIdx(p => p.includes(i) ? p.filter(x => x !== i) : [...p, i])} style={{ flex: 1, padding: '2px', fontSize: '8px', fontWeight: 600, background: removed ? '#2d1010' : 'var(--bg-raised)', border: `1px solid ${removed ? 'var(--error)' : 'var(--border)'}`, borderRadius: '3px', color: removed ? '#f87171' : 'var(--text-muted)', cursor: 'pointer' }}>{removed ? 'Add' : 'X'}</button>
+                                        {!removed && <>
+                                          <button onClick={() => setRescrapeBgIdx(p => p.includes(i) ? p.filter(x => x !== i) : [...p, i])} style={{ flex: 1, padding: '2px', fontSize: '8px', fontWeight: 600, background: hasBg ? '#071a0e' : 'var(--bg-raised)', border: `1px solid ${hasBg ? '#22c55e' : 'var(--border)'}`, borderRadius: '3px', color: hasBg ? '#4ade80' : 'var(--text-muted)', cursor: 'pointer' }}>BG</button>
+                                          <button onClick={() => setRescrapeWmIdx(p => p.includes(i) ? p.filter(x => x !== i) : [...p, i])} style={{ flex: 1, padding: '2px', fontSize: '8px', fontWeight: 600, background: hasWm ? '#0f0f1a' : 'var(--bg-raised)', border: `1px solid ${hasWm ? 'var(--brand)' : 'var(--border)'}`, borderRadius: '3px', color: hasWm ? '#a78bfa' : 'var(--text-muted)', cursor: 'pointer' }}>WM</button>
+                                        </>}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              <button onClick={handleRescrapeUpload} style={{ padding: '8px', background: 'var(--brand)', border: 'none', borderRadius: '6px', color: '#fff', fontSize: '11px', fontWeight: 700, cursor: 'pointer' }}>
+                                Upload {rescrapeImages.length - rescrapeRemovedIdx.length} Images
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </>;
+                  })()}
                 </div>
 
                 {/* Quick stats */}
@@ -832,6 +1153,124 @@ export default function ProductsPage() {
       </div>}
 
       {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
+
+      {/* ── Catalog Modal ── */}
+      {showCatalog && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 9997,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px',
+        }} onClick={() => setShowCatalog(false)}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: 'var(--bg-surface)', border: '1px solid var(--border)',
+            borderRadius: '16px', padding: '24px', width: '100%', maxWidth: '520px',
+            maxHeight: '80vh', overflowY: 'auto',
+          }}>
+            <div style={{ fontSize: '16px', fontWeight: 700, color: 'var(--text-base)', marginBottom: '20px' }}>
+              Generate Wholesale Catalog
+            </div>
+
+            {/* Title */}
+            <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px' }}>
+              Catalog Title
+            </label>
+            <input
+              value={catalogTitle} onChange={e => setCatalogTitle(e.target.value)}
+              style={{
+                width: '100%', padding: '9px 12px', background: 'var(--bg-raised)',
+                border: '1px solid var(--border)', borderRadius: '8px',
+                color: 'var(--text-base)', fontSize: '13px', outline: 'none',
+                boxSizing: 'border-box', minHeight: '44px', marginBottom: '16px',
+              }}
+            />
+
+            {/* Discount + Layout row */}
+            <div style={{ display: 'flex', gap: '12px', marginBottom: '16px' }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px' }}>
+                  Wholesale Discount %
+                </label>
+                <input
+                  type="number" min={0} max={100}
+                  value={catalogDiscount} onChange={e => setCatalogDiscount(Number(e.target.value))}
+                  style={{
+                    width: '100%', padding: '9px 12px', background: 'var(--bg-raised)',
+                    border: '1px solid var(--border)', borderRadius: '8px',
+                    color: 'var(--text-base)', fontSize: '13px', outline: 'none',
+                    boxSizing: 'border-box', minHeight: '44px',
+                  }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px' }}>
+                  Layout
+                </label>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  {(['grid', 'list'] as const).map(l => (
+                    <button key={l} onClick={() => setCatalogLayout(l)} style={{
+                      flex: 1, padding: '9px', minHeight: '44px',
+                      background: catalogLayout === l ? 'var(--brand-glow)' : 'var(--bg-raised)',
+                      border: `1px solid ${catalogLayout === l ? 'var(--brand)' : 'var(--border)'}`,
+                      borderRadius: '8px',
+                      color: catalogLayout === l ? '#a78bfa' : 'var(--text-muted)',
+                      fontSize: '12px', fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize',
+                    }}>{l === 'grid' ? 'Grid (2/page)' : 'List (1/page)'}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Per-product price overrides */}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px' }}>
+                Product Prices — {selectedIds.size} selected
+              </label>
+              <div style={{ fontSize: '10px', color: 'var(--text-dim)', marginBottom: '8px' }}>
+                Leave blank to use {catalogDiscount > 0 ? `${catalogDiscount}% off retail` : 'retail price'}. Set a value to override.
+              </div>
+              <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {products.filter(p => selectedIds.has(p._id)).map(p => (
+                  <div key={p._id} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 0' }}>
+                    <div style={{ flex: 1, minWidth: 0, fontSize: '12px', color: 'var(--text-base)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {p.name}
+                    </div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-dim)', flexShrink: 0, width: '60px', textAlign: 'right' }}>
+                      {p.price != null ? `$${p.price.toLocaleString()}` : '—'}
+                    </div>
+                    <input
+                      type="number" min={0} placeholder="Auto"
+                      value={catalogPrices[p._id] || ''}
+                      onChange={e => setCatalogPrices(prev => ({ ...prev, [p._id]: e.target.value }))}
+                      style={{
+                        width: '90px', padding: '5px 8px', background: 'var(--bg-raised)',
+                        border: `1px solid ${catalogPrices[p._id] ? 'var(--brand)' : 'var(--border)'}`,
+                        borderRadius: '6px', color: 'var(--text-base)', fontSize: '12px',
+                        outline: 'none', textAlign: 'right',
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowCatalog(false)} style={{
+                padding: '10px 18px', background: 'transparent',
+                border: '1px solid var(--border)', borderRadius: '8px',
+                color: 'var(--text-muted)', fontSize: '13px', cursor: 'pointer', minHeight: '44px',
+              }}>Cancel</button>
+              <button onClick={handleGenerateCatalog} disabled={generatingCatalog} style={{
+                padding: '10px 22px', background: generatingCatalog ? '#1e1b4b' : 'var(--brand)',
+                border: 'none', borderRadius: '8px', color: '#fff',
+                fontSize: '13px', fontWeight: 700, cursor: generatingCatalog ? 'not-allowed' : 'pointer',
+                opacity: generatingCatalog ? 0.7 : 1, minHeight: '44px',
+              }}>
+                {generatingCatalog ? 'Generating…' : `Download PDF (${selectedIds.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
